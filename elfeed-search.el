@@ -323,8 +323,8 @@ Movement is configured by `elfeed-search-remain-on-entry'."
 (defun elfeed-search ()
   "Enter `elfeed-search' buffer."
   (interactive)
-  (switch-to-buffer (elfeed-search-buffer))
-  (unless (eq major-mode 'elfeed-search-mode)
+  (display-buffer (elfeed-search-buffer))
+  (with-current-buffer (elfeed-search-buffer)
     (elfeed-search-mode)))
 
 (defun elfeed-search-buffer ()

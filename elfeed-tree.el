@@ -178,9 +178,9 @@ list of tag symbols."
 (defun elfeed-tree ()
   "Enter `elfeed-tree' buffer."
   (interactive)
-  (switch-to-buffer (elfeed-tree--buffer))
-  (unless (eq major-mode 'elfeed-tree-mode)
-    (elfeed-tree-mode)))
+  (display-buffer (elfeed-tree--buffer))
+  (with-current-buffer (elfeed-tree--buffer))
+    (elfeed-tree-mode))
 
 (defun elfeed-tree--buffer ()
   "Create and return tree buffer."
