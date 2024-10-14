@@ -374,14 +374,14 @@ Movement is configured by `elfeed-search-remain-on-entry'."
 (defun elfeed-search (&optional new-filter)
   "Enter `elfeed-search' buffer, optionally with a NEW-FILTER."
   (interactive)
-  (switch-to-buffer (elfeed-search-buffer))
-  (unless (eq major-mode 'elfeed-search-mode)
-    (elfeed-search-mode))
-  (when new-filter
-    ;; Scroll to top when resetting the buffer
-    (goto-char (point-min))
-    (set-window-start nil (point-min))
-    (elfeed-search-set-filter new-filter)))
+  (display-buffer (elfeed-search-buffer))
+  (with-current-buffer (elfeed-search-buffer)
+    (elfeed-search-mode)
+    (when new-filter
+      ;; Scroll to top when resetting the buffer
+      (goto-char (point-min))
+      (set-window-start nil (point-min))
+      (elfeed-search-set-filter new-filter))))
 
 (defun elfeed-search-buffer ()
   "Create and return search buffer."
