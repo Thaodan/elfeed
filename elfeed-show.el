@@ -193,6 +193,8 @@ All attachments are saved in the chosen directory."
   "Update the buffer to match the selected entry, using a mail-style."
   (let* ((inhibit-read-only t)
          (title (elfeed-entry-title elfeed-show-entry))
+         (title (decode-coding-string
+                 title (detect-coding-string title t) t))
          (date (seconds-to-time (elfeed-entry-date elfeed-show-entry)))
          (authors (elfeed-meta elfeed-show-entry :authors))
          (link (elfeed-entry-link elfeed-show-entry))
@@ -259,7 +261,12 @@ The result depends on the value of `elfeed-show-unique-buffers'."
 
 (defun elfeed-show-entry (entry)
   "Display ENTRY in the current buffer."
-  (let ((buffer (get-buffer-create (elfeed-show--buffer-name entry))))
+  (let* ((buffer-title (elfeed-show--buffer-name entry))
+         (buffer-title (decode-coding-string
+                        buffer-title
+                        (detect-coding-string buffer-title t)
+                        t))
+         ((buffer (get-buffer-create buffer-title))))
     (with-current-buffer buffer
       (elfeed-show-mode)
       (setq elfeed-show-entry entry))
@@ -673,7 +680,10 @@ content is stored in the entry metadata under the key :link-content."
 
 (defun elfeed-show-bookmark-make-record ()
   "Save the current position and the entry into a bookmark."
-  (let ((title (elfeed-meta--title elfeed-show-entry)))
+  (let* ((title (elfeed-meta--title elfeed-show-entry))
+         (title (decode-coding-string
+                 title
+                 (detect-coding-string title t) t)))
     `(,(format "elfeed entry \"%s\"" title)
       (id . ,(elfeed-entry-id elfeed-show-entry))
       (location . ,title)

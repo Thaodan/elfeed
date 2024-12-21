@@ -467,6 +467,9 @@ The customization `elfeed-search-date-format' sets the formatting."
          (title (if (or (not title) (equal title ""))
                     (elfeed-entry-link entry)
                   title))
+         (title (and title
+                     (decode-coding-string
+                      title (detect-coding-string title t) t)))
          (title-faces (elfeed-search--faces (elfeed-entry-tags entry)))
          (window (get-buffer-window))
          (title-width (elfeed-clamp
@@ -484,7 +487,10 @@ The customization `elfeed-search-date-format' sets the formatting."
 (defun elfeed-search--column-feed (entry)
   "Format the feed column for ENTRY, return string."
   (when-let* ((feed (elfeed-entry-feed entry))
-              (title (elfeed-meta--title feed)))
+              (title (elfeed-meta--title feed))
+              (title (and title
+                          (decode-coding-string
+                           title (detect-coding-string title t) t))))
     (propertize title 'face 'elfeed-search-feed-face
                 'mouse-face 'highlight
                 'follow-link [elfeed-feed])))
