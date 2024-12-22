@@ -11,6 +11,8 @@
 ;;; Code:
 
 (eval-when-compile (require 'subr-x))
+(require 'shr)
+(require 'eww)
 
 (require 'elfeed-search)
 
@@ -48,6 +50,29 @@ Called without arguments."
 This allows for displaying multiple show buffers at the same
 time."
   :type 'boolean)
+
+(defcustom elfeed-show-entry-retrieve-content-link 180
+  "Possible matches for entries which contents should be using eww retrieved.
+Entries have to contain link property.
+Match can be either the maximum length of content in characters,
+a matching regular expression, a boolean or a list of possible matches."
+  :type '(choice
+          regexp
+          integer
+          boolean
+          (repeat (choice regexp
+                          integer))))
+
+(defcustom elfeed-show-entry-retrieve-content-link-readability eww-readable-urls
+  "Elfeed's variant of URL's where EWW's readability functions are applied.
+Depends on `eww-readable'.  Defaults to `eww-readable-urls' if available."
+  :link '(variable-link eww-readable-urls)
+  :require #'eww-readable
+  :type '(repeat (choice (string :tag "Readable URL")
+                         (cons :tag "URL and Readability"
+                               (string :tag "URL")
+                               (radio (const :tag "Readable" t)
+                                      (const :tag "Non-readable" nil))))))
 
 (defcustom elfeed-enclosure-default-dir "~/"
   "Default directory for saving enclosures.
@@ -92,12 +117,43 @@ All attachments are saved in the chosen directory."
 (defvar-local elfeed-show-entry nil
   "The entry being displayed in this buffer.")
 
+(defvar-local elfeed-show-entry-readable '(empty)
+  "If true entry was made readable.")
+
+(unless (fboundp #'eww-default-readable-p)
+  (defun elfeed-default-readable-p (url)
+    "Return non-nil if URL should be displayed in readable mode by default.
+This consults the entries in
+`elfeed-show-entry-retrieve-content-link-readability' (which see)."
+    (catch 'found
+      (let (result)
+        (dolist (regexp eww-readable-urls)
+          (if (consp regexp)
+              (setq result (cdr regexp)
+                    regexp (car regexp))
+            (setq result t))
+          (when (string-match regexp url)
+            (throw 'found result))))))
+  (defalias 'eww-default-readable-p 'elfeed-default-readable-p)
+  (defalias 'eww-readable-urls nil))
+
+;; Emacs < 31 compatibility
+(with-no-warnings
+  (if (fboundp 'eww-readable-dom)
+      (defalias 'elfeed-readable-dom #'eww-readable-dom)
+    (defun elfeed-readable-dom (dom)
+      "Return a readable version of DOM."
+      (eww-score-readability dom)
+      (eww-highest-readability dom))))
+
 (defvar elfeed-show-refresh-function #'elfeed-show-refresh--mail-style
   "Function called to refresh the elfeed-entry buffer.")
 
 (defvar elfeed-show-update-hook
-  (list #'elfeed-show-auto-readable
-        #'elfeed-show-auto-fetch-link)
+  (list
+   ;; #'elfeed-show-auto-readable FIXME
+
+   #'elfeed-show-auto-fetch-link)
  "Functions in this list are called after the show buffer has been updated.")
 
 (defvar-keymap elfeed-show-mode-map
@@ -122,7 +178,8 @@ All attachments are saved in the chosen directory."
   "<mouse-2>" #'shr-browse-url
   "A" #'elfeed-show-add-enclosure-to-playlist
   "P" #'elfeed-show-play-enclosure
-  "R" #'elfeed-show-readable
+  ;; "R" #'elfeed-show-readable
+  "R" #'elfeed-show-togge-readable
   "SPC" #'elfeed-show-scroll-up-or-next
   "S-SPC" #'elfeed-show-scroll-down-or-prev
   "DEL" #'elfeed-show-scroll-down-or-prev)
@@ -173,6 +230,160 @@ All attachments are saved in the chosen directory."
   "Tag the current entry as unread."
   (interactive nil elfeed-show-mode)
   (elfeed-show-tag 'unread))
+
+(defun elfeeed--html-if-doctype (_headers response-buffer)
+  "Return \"text/html\" if RESPONSE-BUFFER has an HTML doctype declaration.
+HEADERS is unused."
+  ;; https://html.spec.whatwg.org/multipage/syntax.html#the-doctype
+  (with-current-buffer response-buffer
+    (let ((case-fold-search t))
+      (save-excursion
+        (goto-char (point-min))
+        ;; Match basic "<!doctype html>" and also legacy variants as
+        ;; specified in link above -- being purposely lax about it.
+        (when (search-forward "<!doctype html" nil t)
+          "text/html")))))
+
+(defalias 'elfeed--guess-cotent-type-headers
+  (if (fboundp #'eww--guess-content-type)
+      #'eww--guess-content-type))
+
+(defvar-local elfeed--render-html-tick 0
+  "Insert counter for the current buffer.
+This counter helps protecting against inserting outdated images.")
+(put 'elfeed--render-html-tick 'permanent-local t)
+
+(defun elfeed-render (status url &optional point buffer encode explicit-content-type insert-point)
+  (cl-letf* ((headers (eww-parse-headers))
+	     (content-type (or
+                        explicit-content-type
+                        (mail-header-parse-content-type
+                         (if (zerop (length (cdr (assoc "content-type" headers))))
+                             (elfeed--guess-cotent-type-headers headers (current-buffer))
+                           (cdr (assoc "content-type" headers))))))
+	     (charset  (intern
+		            (downcase
+		             (or (cdr (assq 'charset (cdr content-type)))
+			             (eww-detect-charset (eww-html-p (car content-type)))
+			             "utf-8"))))
+	     (data-buffer (current-buffer))
+	     (shr-target-id (url-target (url-generic-parse-url url)))
+         (tick (incf elfeed--render-html-tick))
+         (orig (symbol-function 'url-queue-retrieve))
+         ((symbol-function 'url-queue-retrieve)
+          (lambda (url cb &rest args)
+            (let ((cb (if (eq cb #'shr-image-fetched)
+                          (lambda (status buffer &rest args)
+                            (when (and (buffer-live-p buffer)
+                                       (= tick
+                                              (buffer-local-value
+                                               'elfeed--render-html-tick buffer)))
+                              (apply #'shr-image-fetched status buffer args)))
+                        cb)))
+              (apply orig url cb args))))
+	     (last-coding-system-used))
+    ;; Reset point after `eww-parse-headers' when CONTENT-TYPE was explicit
+    ;; we assume explicit content type means a document without headers
+    (when explicit-content-type
+        (goto-char (point-min)))
+    (let ((redirect (plist-get status :redirect)))
+      (when redirect
+        (setq url redirect)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        ;; Make buffer listings more informative.
+        (setq list-buffers-directory url)
+        ;; Let the URL library have a handle to the current URL for
+        ;; referer purposes.
+        (setq url-current-lastloc (url-generic-parse-url url)))
+      ()
+      (unwind-protect
+	      (progn
+	        (cond
+             ((and eww-use-external-browser-for-content-type
+                   (string-match-p eww-use-external-browser-for-content-type
+                                   (car content-type)))
+              ;; (erase-buffer)
+              (insert "<title>Unsupported content type</title>")
+              (insert (format "<h1>Content-type %s is unsupported</h1>"
+                              (car content-type)))
+              (insert (format "<a href=%S>Direct link to the document</a>"
+                              url))
+              (goto-char (point-min))
+              (elfeed-display-html (or encode charset)
+                                   url nil point buffer insert-point))
+             ;; FIXME: The pdf and image case use the eww functions which erase the buffer
+	         ((equal (car content-type) "application/pdf")
+	          (eww-display-pdf))
+	         ((string-match-p "\\`image/" (car content-type))
+	          (eww-display-image buffer))
+             ((eww-html-p (car content-type))
+              (elfeed-display-html (or encode charset)
+                                   url nil point buffer insert-point))
+	         (t
+	          (elfeed-display-raw buffer (or encode charset 'utf-8)) insert-point))
+	        (with-current-buffer buffer
+	          (plist-put eww-data :url url)
+	          (and last-coding-system-used
+		           (set-buffer-file-coding-system last-coding-system-used))
+              (unless shr-fill-text
+                (visual-line-mode)
+                (visual-wrap-prefix-mode))
+	          (run-hooks 'eww-after-render-hook)
+              ;; Enable undo again so that undo works in text input
+              ;; boxes.
+              (setq buffer-undo-list nil)))
+        (kill-buffer data-buffer)))
+    (unless (buffer-live-p buffer)
+      (kill-buffer data-buffer))))
+
+(defun elfeed-display-html (charset url &optional document point buffer insert-point)
+  (let ((source (buffer-substring (point) (point-max))))
+    (with-current-buffer buffer
+      (plist-put document :source source)))
+  (unless document
+    (let ((dom (eww--parse-html-region (point) (point-max) charset))
+          (eww-readable-urls elfeed-show-entry-retrieve-content-link-readability))
+      (when (with-current-buffer buffer
+              (or (and (or (booleanp elfeed-show-entry-readable)
+                            elfeed-show-entry-readable)
+                       (not (eww-default-readable-p url)))
+                  (and (elfeed-meta (elfeed-entry-feed elfeed-show-entry) :readable)
+                       (and (booleanp elfeed-show-entry-readable)
+                            (not elfeed-show-entry-readable)))
+                  (and (eww-default-readable-p url)
+                       (or (not (booleanp elfeed-show-entry-readable))
+                           (not elfeed-show-entry-readable)))))
+        (setq dom (elfeed-readable-dom dom))
+        (setq elfeed-show-entry-readable t))
+      (setq document (eww-document-base url dom))))
+  (with-current-buffer buffer
+    (let ((inhibit-read-only t)
+          (inhibit-modification-hooks t))
+      (when insert-point
+        (goto-char insert-point))
+      (elfeed-display-document document point buffer))))
+
+(defun elfeed-display-raw (buffer &optional encode insert-point)
+  (let ((data (buffer-substring (point) (point-max))))
+    (unless (buffer-live-p buffer)
+      (error "Buffer %s doesn't exist" buffer))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (when insert-point
+          (goto-char insert-point))
+	    (insert data)
+	    (condition-case nil
+	        (decode-coding-region (point-min) (1+ (length data)) encode)
+	      (coding-system-error nil)))
+      (goto-char (point-min)))))
+
+(defun elfeed-compute-base (url)
+  "Return the base URL for URL, useful for relative paths."
+  (let ((obj (url-generic-parse-url url)))
+    (setf (url-filename obj) nil)
+    (setf (url-target obj) nil)
+    (url-recreate-url obj)))
 
 (defun elfeed-show--format-author (author)
   "Format AUTHOR plist for the header."
@@ -232,13 +443,102 @@ All attachments are saved in the chosen directory."
              do (insert (propertize "Enclosure: " 'face 'elfeed-show-header-face))
              do (elfeed-insert-link (car enclosure) nil elfeed-show-truncate-long-urls)
              do (insert "\n"))
-    (insert (propertize "\n" 'face 'italic 'elfeed-entry-content t))
-    (if (and content (not (string-blank-p content)))
-        (if (eq type 'html)
-            (elfeed-insert-html content base)
-          (insert content))
-      (insert (propertize "(empty)\n" 'face 'italic 'elfeed-link-content t)))
-    (goto-char (point-min))))
+    (insert "\n")
+    (cond ((and elfeed-show-entry-retrieve-content-link
+                (or
+                 ;; regexp
+                 (and (stringp elfeed-show-entry-retrieve-content-link)
+                      (string-match elfeed-show-entry-retrieve-content-link
+                                    link))
+                 ;; number of characters
+                 (and (integerp elfeed-show-entry-retrieve-content-link)
+                      (or (not content)
+                          (<= (length content) elfeed-show-entry-retrieve-content-link)))
+                 ;; list of either above
+                 (and (listp elfeed-show-entry-retrieve-content-link)
+                      (let ((retrieve-conditions elfeed-show-entry-retrieve-content-link)
+                            condition
+                            (result t))
+                        ;; Loop through until no conditions are left or found a result
+                        (while (and result
+                                    (setq condition (pop retrieve-conditions)))
+                          (when (or (and
+                                     ;; regexp
+                                     (stringp condition)
+                                     (string-match condition
+                                                   link))
+                                    ;; number of characters
+                                    (and (integerp condition)
+                                         (or (not content)
+                                             (<= (length content)
+                                                 condition))))
+                            ;; Make while condition fail a result has been found
+                            (setq result nil)))
+                        ;; Invert result
+                        (not result)))
+                 ;; a true boolean (by this point it can only be true)
+                 (booleanp elfeed-show-entry-retrieve-content-link)
+                 nil))
+           (eww-retrieve link #'elfeed-render (list link (point-min)
+                                                    (current-buffer) nil nil (point))))
+          ((and content (not (string-blank-p content)))
+           ;; FIXME: Elfeed doesn't really differentiate between content and description.
+           ;; Some entries might claim to have content but they don't.
+           ;; Calling `eww-retrieve' on those entries without content should be enough but yeah..
+           (let ((content-buffer (current-buffer))
+                 (elfeed-show-entry-retrieve-content-link-readability nil)
+                 (content-type `(,(cond ((eq type 'html)
+                                         "text/html")
+                                        (t "text/plain"))
+                                 (char-set . nil))))
+             (with-temp-buffer
+               (insert content)
+               (elfeed-render nil link (point-min) content-buffer nil content-type (point)))))
+          (t
+           (insert (propertize "(empty)\n" 'face 'italic
+                               'elfeed-link-content t))
+           (goto-char (point-min))))))
+
+(defun elfeed-display-document (document &optional point buffer)
+  (unless (fboundp 'libxml-parse-html-region)
+    (error "This function requires Emacs to be compiled with libxml2"))
+  (setq buffer (or buffer (current-buffer)))
+  (unless (buffer-live-p buffer)
+    (error "Buffer %s doesn't exist" buffer))
+  ;; There should be a better way to abort loading images
+  ;; asynchronously.
+  (setq url-queue nil)
+  (let ((url (when (eq (car document) 'base)
+               (alist-get 'href (cadr document)))))
+    (unless url
+      (error "Document is missing base URL"))
+    (with-current-buffer buffer
+      (setq bidi-paragraph-direction nil)
+      (let ((inhibit-read-only t)
+	        (inhibit-modification-hooks t)
+            ;; Possibly set by the caller, e.g., `eww-render' which
+            ;; preserves the old URL #target before chasing redirects.
+            (shr-target-id (or shr-target-id
+                               (url-target (url-generic-parse-url url)))))
+        (with-delayed-message (2 "Rendering HTML...")
+	      (shr-insert-document document))
+	    (cond
+	     (point
+	      (goto-char point))
+	     (shr-target-id
+	      (goto-char (point-min))
+          (let ((match (text-property-search-forward
+                        'shr-target-id shr-target-id #'member)))
+            (when match
+              (goto-char (prop-match-beginning match)))))
+	     (t
+	      ;; (goto-char (point-min))
+	      ;; Don't leave point inside forms, because the normal eww
+	      ;; commands aren't available there.
+	      (while (and (not (eobp))
+		              (get-text-property (point) 'eww-form))
+	        (forward-line 1)))))
+      (eww-size-text-inputs))))
 
 (defun elfeed-show-refresh (&rest _)
   "Update the buffer to match the selected entry.
@@ -247,6 +547,23 @@ Used as `revert-buffer-function'."
   (interactive)
   (funcall elfeed-show-refresh-function)
   (run-hooks 'elfeed-show-update-hook))
+
+(defun elfeed-show-togge-readable ()
+    "Toggle display of only the main \"readable\" parts of the current web page.
+This command uses heuristics to find the parts of the web page that
+contain the main textual portion, leaving out navigation menus and the
+like.
+
+If called interactively, toggle the display of the readable parts.  If
+the prefix argument is positive, display the readable parts, and if it
+is zero or negative, display the full page.
+
+If called from Lisp, toggle the display of the readable parts if ARG is
+`toggle'.  Display the readable parts if ARG is nil, omitted, or is a
+positive number.  Display the full page if ARG is a negative number."
+    (interactive nil elfeed-show-mode)
+    (setq elfeed-show-entry-readable (not elfeed-show-entry-readable))
+    (elfeed-show-refresh))
 
 (defun elfeed-show--buffer-name (entry)
   "Return the appropriate buffer name for ENTRY.
@@ -649,13 +966,13 @@ content is stored in the entry metadata under the key :link-content."
                   `(,@elfeed-transform-html-functions ,#'elfeed-show--readable)))
     (message "Readable: %s" (if off "off" "on"))
     (elfeed-show-refresh)))
-
-(defun elfeed-show-auto-readable ()
-  "Automatically enable readable mode."
-  (when (and (not (local-variable-p 'elfeed-transform-html-functions))
-             (elfeed-meta (elfeed-entry-feed elfeed-show-entry) :readable))
-    (let ((inhibit-message t))
-      (elfeed-show-readable))))
+;; FIXME
+;; (defun elfeed-show-auto-readable ()
+;;   "Automatically enable readable mode."
+;;   (when (and (not (local-variable-p 'elfeed-transform-html-functions))
+;;              (elfeed-meta (elfeed-entry-feed elfeed-show-entry) :readable))
+;;     (let ((inhibit-message t))
+;;       (elfeed-show-readable))))
 
 ;; Bookmarks
 
