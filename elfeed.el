@@ -837,15 +837,18 @@ if another update is already running."
 ;; New entry filtering
 
 (cl-defun elfeed-make-tagger
-    (&key feed-title feed-url entry-title entry-link categories
+    (&key feed-title feed-url feed-author entry-title entry-link categories
+          entry-content-type entry-enclosure
           after before add remove callback)
   "Create a function that adds or removes tags on matching entries.
 
-FEED-TITLE, FEED-URL, ENTRY-TITLE, ENTRY-LINK and CATEGORIES are regular
-expressions or an expression (not <regex>), which indicates a negative
-match.  AFTER and BEFORE are relative times (see `elfeed-time-duration').
-Entries must match all provided expressions.  If an entry matches, add
-tags ADD and remove tags REMOVE.  Call CALLBACK for each entry.
+FEED-TITLE, FEED-URL, FEED-AUTHOR, ENTRY-TITLE, CATEGORIES, ENTRY-LINK,
+ENTRY-ENCLOSURE and ENTRY-CONTENT-TYPE
+are regular expressions or a list \(not <regex>\),
+which indicates a negative match.  AFTER and BEFORE are relative times
+\(see `elfeed-time-duration'\).  Entries must match all provided
+expressions.  If an entry matches, add tags ADD and remove tags
+REMOVE.  Call CALLBACK for each entry.
 
 Examples,
 
@@ -878,9 +881,12 @@ The returned function should be added to `elfeed-new-entry-hook'."
           (when (and
                  (match feed-title  (elfeed-feed-title  feed))
                  (match feed-url    (elfeed-feed-url    feed))
+                 (match feed-author (elfeed-feed-author feed))
                  (match entry-title (elfeed-entry-title entry))
                  (match entry-link  (elfeed-entry-link  entry))
                  (match categories  (elfeed-meta entry :categories))
+                 (match entry-content-type (elfeed-entry-content-type entry))
+                 (match entry-enclosure (elfeed-entry-enclosures entry))
                  (or (not after-time)  (> date (- (float-time) after-time)))
                  (or (not before-time) (< date (- (float-time) before-time))))
             (when add
